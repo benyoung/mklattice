@@ -1,0 +1,1700 @@
+#!/usr/bin/perl -w
+
+# mklattice is a program for drawing lattices.  It takes an ascii input file
+# which describes the shape and connectivity of the lattice, the latex
+# labels to place on the edges, and various other parameters; it produces 
+# as output a ps or pdf file as well as LaTeX overlay containing the label
+# text in the proper places.
+
+use strict;
+
+
+#===========================================================================
+# Read in a line of the graph.  Split it up into a 2d array of characters.
+
+sub read_graph_line($$) {
+	my ($line, $r_raw) = @_;
+	my @chars;
+
+	chomp $line;
+    $line .= "   ";  # remove some edge cases in the parsing... assumption is that there
+                     # are always characters to the right of an edge
+	@chars = split //, $line;
+	push(@$r_raw, [@chars]);
+}
+
+#===========================================================================
+# Read in a line of parameters.  The parameters are actually just a chunk of
+# perl code which we will blindly execute.  So we just concatenate the
+# parameters onto the end of the 2nd argument.
+
+sub read_param_line($$) {
+	my ($line, $r_param_str) = @_;
+	$$r_param_str .= $line;
+}
+
+#===========================================================================
+# Read in a line of labels.  Store what row it goes with, which side of
+# the edge it goes on, and what the labels all are.
+
+sub read_label_line($$) {
+	my ($line, $r_labels) = @_;
+	my ($key, $val);
+
+	chomp $line;
+	($key, $_) = ($line =~ /^(.*?):(.*?)$/);
+	
+	$$r_labels{$key} = [ split ];
+}
+
+
+#============================================================================
+# Look through a graph line, and find the vertices.  Give each vertex a name
+# and set up a record for it.
+
+sub add_vertex($$$$$) {
+	my ($r_vertices, $i, $j, $col, $type) = @_;
+    my $name = "V($i)($j)";
+
+	$$r_vertices{$name} = {
+		type => $type,
+		row  => $i,
+		col  => $col,
+		neighbour_names => [],
+		incident_edges => {},
+        show => 1
+	};
+    return $name;
+}
+
+#============================================================================
+# Look through a graph line and find the edges.  Set up a record for each
+# edge, and give each edge a name.  Record the endpoints.
+
+sub add_edge($$$$$$$$$){
+	my ($r_vertices, $r_edges, $i1, $j1, $i2, $j2, $dir, $row, $count) = @_;
+	my ($v1_name, $v1, $v2_name, $v2, $e_name);
+
+	$v1_name = "V($i1)($j1)";
+	$v2_name = "V($i2)($j2)";
+	$v1 = $$r_vertices{$v1_name};
+	$v2 = $$r_vertices{$v2_name};
+	$e_name = "E($i1)($j1)($i2)($j2)";
+	
+	$$r_edges{$e_name} = {
+		v1_name => $v1_name,
+		v2_name => $v2_name,
+		type => $$v1{type} . $$v2{type},
+		direction => $dir,
+		row => $row,
+		count =>$count,
+        show => 1,
+	};
+
+	push @{ $$v1{neighbour_names} }, $v2_name;
+	push @{ $$v2{neighbour_names} }, $v1_name;
+	$$v1{incident_edges}{$v2_name} = $e_name;
+	$$v2{incident_edges}{$v1_name} = $e_name;
+    return $e_name;
+}
+
+
+#============================================================================
+# Go through the array of characters and generate a graph data structure,
+# making note of the orientations, colors, etc.  of the vertices and edges.
+sub parse_graph($$$$$) {
+	my ($r_raw, $r_vertices, $r_edges, $r_params, $r_mask) = @_;
+	my ($i, $j, $col, $vertex_types, $name);
+       
+	$vertex_types = $$r_params{vertex_types};
+    my $mask_specified = 0;
+    $mask_specified = 1 if((scalar @$r_mask) > 0);
+
+	# find vertices
+	for($i=0;$i<= $#$r_raw; $i++) {
+		$col = 1;
+		for($j=0;$j <= $#{$$r_raw[$i]}; $j++) {
+			if($$r_raw[$i][$j]=~ /$vertex_types/) {
+				$name = add_vertex($r_vertices, $i, $j, $col, 
+                                        $$r_raw[$i][$j]);
+
+                if($mask_specified and $$r_mask[$i][$j] eq " ") {
+                    $$r_vertices{$name}{"show"} = 0;
+                }
+				$col++;
+			}
+		}
+	} 
+
+    my $multiple = 0;
+    $multiple = 1 if(exists $$r_params{multiple_edges});
+	# find edges
+	for($i=0;$i<= $#$r_raw; $i++) {
+		$col = 0;
+		for($j=0;$j <= $#{$$r_raw[$i]}; $j++) {
+            $name = "";
+			if($$r_raw[$i][$j] eq "/") {
+				$name = add_edge($r_vertices, $r_edges, $i+1, $j-1, 
+					$i-1, $j+1, "/", $i, $col);
+                if($multiple and $$r_raw[$i][$j+1] =~ /[01234]/) {
+                    $$r_edges{$name}{multiplicity} = $$r_raw[$i][$j+1];
+                }
+				$col++;
+			} elsif($$r_raw[$i][$j] eq ",") {
+				$name = add_edge($r_vertices, $r_edges, $i+1, $j-1, 
+					$i-1, $j+1, ",", $i, $col);
+				$col++;
+			} elsif( $$r_raw[$i][$j] eq "\\") {
+				$name = add_edge($r_vertices, $r_edges, $i-1, $j-1, 
+					$i+1, $j+1, "\\", $i, $col);
+                if($multiple and $$r_raw[$i][$j+1] =~ /[01234]/) {
+                    $$r_edges{$name}{multiplicity} = $$r_raw[$i][$j+1];
+                }
+				$col++;
+			} elsif( $$r_raw[$i][$j] eq "`") {
+				$name = add_edge($r_vertices, $r_edges, $i-1, $j-1, 
+					$i+1, $j+1, "`", $i, $col);
+				$col++;
+			} elsif( $$r_raw[$i][$j] eq "-" 
+                                 and $$r_raw[$i][$j+1] eq "-" 
+                                 and  $$r_raw[$i][$j+2] eq "-" ){
+				$name = add_edge($r_vertices, $r_edges, $i, $j-1, 
+					$i, $j+3, "-", $i, $col);
+				$col++;
+			} elsif ( $multiple  and $$r_raw[$i][$j] eq "-" 
+                                 and $$r_raw[$i][$j+1] =~ /[01234]/
+                                 and  $$r_raw[$i][$j+2] eq "-"
+                                 ) {
+                $name = add_edge($r_vertices, $r_edges, $i, $j-1, 
+					$i, $j+3, "-", $i, $col);
+                $$r_edges{$name}{multiplicity} = $$r_raw[$i][$j+1];
+				$col++;
+            } elsif( $$r_raw[$i][$j] eq "="){
+				$name = add_edge($r_vertices, $r_edges, $i, $j-1, 
+					$i, $j+1, "=", $i, $col);
+				$col++;
+			} elsif( $$r_raw[$i][$j] eq "~"){
+				$name = add_edge($r_vertices, $r_edges, $i, $j-1, 
+					$i, $j+1, "~", $i, $col);
+				$col++;
+            } elsif( $$r_raw[$i][$j] eq "." 
+                                 and $$r_raw[$i][$j+1] eq "." 
+                                 and  $$r_raw[$i][$j+2] eq "." ){
+				$name = add_edge($r_vertices, $r_edges, $i, $j-1, 
+					$i, $j+3, ".", $i, $col);
+				$col++;
+			} elsif( $$r_raw[$i][$j] eq "|" ){
+				$name = add_edge($r_vertices, $r_edges, $i-1, $j, 
+					$i+1, $j, "|", $i, $col);
+				$col++;
+
+			}
+			elsif( $$r_raw[$i][$j] eq ":" ){
+				$name = add_edge($r_vertices, $r_edges, $i-1, $j, 
+					$i+1, $j, ":", $i, $col);
+				$col++;
+			}
+            if($name ne "" and $mask_specified and $$r_mask[$i][$j] eq " ") {
+                $$r_edges{$name}{"show"} = 0;
+            }
+		}
+	}
+}
+
+#============================================================================
+# Assign an 2D direction vector to each edge, accounting for the possibility
+# that we may have somehow switched the "head" and "tail" of the edge.
+sub find_edge_vector($$$){
+	my ($edge, $r_params, $to) = @_;
+	my ($type, $direction, $edge_len, $vec);
+
+	$type = $$edge{type};
+	$edge_len = $$r_params{edge_len}{$type};
+	$direction = $$edge{direction};
+	$vec = $$r_params{unit_vectors}{$direction};
+
+		
+	$vec = [@$vec];
+	
+	$$vec[0] *= $edge_len;
+	$$vec[1] *= $edge_len;
+
+	if($$edge{v1_name} eq $to) {
+		$$vec[0] *= -1;
+		$$vec[1] *= -1;
+	}
+
+	
+	return $vec;
+}
+
+#============================================================================
+sub bfs($$$$); 
+sub bfs($$$$) {
+	my ($root, $r_vertices, $r_edges, $r_params) = @_;
+	my @neighbour_names = @{ $$root{neighbour_names} };
+	foreach(@neighbour_names) {
+		my $vertex = $$r_vertices{$_};
+		if(not exists($$vertex{location})) {
+			my $edge_name = $$root{incident_edges}{$_};
+
+			my $edge = $$r_edges{$edge_name};
+			my $edge_vector = find_edge_vector($edge, $r_params, $_);
+			
+			my $loc = $$root{location};
+			$loc = [@$loc];
+			$$loc[0] += $$edge_vector[0];
+			$$loc[1] += $$edge_vector[1];
+
+			$$vertex{location} = $loc;
+			bfs($vertex, $r_vertices, $r_edges, $r_params);
+		}
+	}
+
+}
+
+#============================================================================
+sub locate_vertices($$$) {
+	my ($r_vertices, $r_edges, $r_params) = @_;
+	my ($v_name, $vertex);
+
+	$v_name = $$r_params{first_vertex};
+	$vertex = $$r_vertices{$v_name};
+	$$vertex{location} = $$r_params{first_location};
+
+	bfs($vertex, $r_vertices, $r_edges, $r_params);
+}
+
+#============================================================================
+sub fit_to_bounding_box($$) {
+	my ($r_vertices, $r_params) = @_;
+
+	my ($vertex_name, $vertex, $min_x, $min_y, $max_x, $max_y, $off_x, $off_y,
+            $box_x, $box_y);
+
+	$vertex_name = $$r_params{first_vertex};
+	$vertex = $$r_vertices{$vertex_name};
+	$min_x = $max_x = $$vertex{location}[0];
+	$min_y = $max_y = $$vertex{location}[1];
+
+	while(($vertex_name, $vertex) = each %$r_vertices) {
+
+         if(not exists($$vertex{location})) {
+            warn "Couldn't determine where to draw vertex $vertex_name (is the graph disconnected?).\n";
+            next;
+         }
+		 $$vertex{location}[0] < $min_x and $min_x = $$vertex{location}[0];
+		 $$vertex{location}[0] > $max_x and $max_x = $$vertex{location}[0];
+		 $$vertex{location}[1] < $min_y and $min_y = $$vertex{location}[1];
+		 $$vertex{location}[1] > $max_y and $max_y = $$vertex{location}[1];
+	}	
+
+	$off_x = $$r_params{boundingbox_margins}[0] - $min_x;
+	$off_y = $$r_params{boundingbox_margins}[1] - $min_y;
+
+	while(($vertex_name, $vertex) = each %$r_vertices) {
+		$$vertex{location}[0] += $off_x;
+		$$vertex{location}[1] += $off_y;
+	}
+
+	$box_x = $max_x + $off_x + $$r_params{boundingbox_margins}[2];
+	$box_y = $max_y + $off_y + $$r_params{boundingbox_margins}[3];
+
+	return [0,0,$box_x, $box_y];
+}
+
+
+#============================================================================
+sub locate_edges($$$) {
+	my ($r_vertices, $r_edges, $r_params) = @_;	
+	my ($edge_name, $edge);
+
+	while(($edge_name, $edge) = each %$r_edges) {
+		my $v1 = $$r_vertices{$$edge{v1_name}};
+		my $v2 = $$r_vertices{$$edge{v2_name}};
+		my $loc_1 = $$v1{location};
+		my $loc_2 = $$v2{location};
+
+        if(not defined($loc_1) or not defined($loc_2) ) {
+            die "Edge $edge_name seems to be missing a vertex\n";
+        }
+		$$edge{location_1} = [@$loc_1];
+		$$edge{location_2} = [@$loc_2];
+
+		my $center = [($$loc_1[0] + $$loc_2[0])/2, ($$loc_1[1] + $$loc_2[1])/2]; 
+
+		my $direction = $$edge{direction};
+
+		my $u = $$r_params{label_unit_vectors}{$direction}; 
+		my $scale = $$r_params{label_offsets}{$direction};
+		my $vec = [$$u[0] * $$scale[0], $$u[1] * $$scale[0]];
+		$$edge{label_1} = [$$center[0] + $$vec[0], $$center[1] + $$vec[1]];
+
+        if( not defined($$u[0]) or not defined($$scale[1])) {
+
+        }
+
+		$vec = [$$u[0] * $$scale[1], $$u[1] * $$scale[1]];
+		$$edge{label_2} = [$$center[0] + $$vec[0], $$center[1] + $$vec[1]];
+	}
+}
+
+
+#============================================================================
+sub print_ps_header($$) {
+	my ($filename, $boundingbox) = @_;
+
+	my $bb_str = join " ", @$boundingbox;
+
+	my $time_str = localtime;
+
+	print <<END_PS_HEADER;
+\%!PS-Adobe-2.0 EPSF-2.0
+\%\%Title: $filename
+\%\%Creator: mklattice.pl
+\%\%CreationDate: $time_str
+\%\%BoundingBox: $bb_str
+\%\%Magnification: 1.0000
+\%\%EndComments
+END_PS_HEADER
+
+}
+
+#============================================================================
+sub print_ps_footer() {
+	print "showpage\n";
+}
+
+#============================================================================
+sub incorporate_overlay($$$$) {
+    my ($r_vertices, $r_overlay_vertices, $r_edges, $r_overlay_edges) = @_;
+
+
+    my ($name, $rec);
+    while(($name, $rec) = each %$r_overlay_vertices) {
+        $$r_vertices{$name} = $rec unless(exists $$r_vertices{$name}) ;
+    }   
+
+    while(($name, $rec) = each %$r_overlay_edges) {
+        my ($multiplicity, $overlay_multiplicity, $edge);
+        if(exists $$r_edges{$name}) 
+        {
+            $edge = $$r_edges{$name};
+            $$edge{overlay_multiplicity} = 1;
+            $$edge{overlay_multiplicity} = $$rec{multiplicity}
+                if(exists $$rec{multiplicity});
+        } else {
+            $$r_edges{$name} = $rec;     
+            # now "multiplicity" in this record refers to overlay multiplicity.  Fix.
+            if(exists $$rec{multiplicity}) {
+                $$rec{overlay_multiplicity} = $$rec{multiplicity};
+            } else {
+                $$rec{overlay_multiplicity} = 1;
+            }
+            $$rec{multiplicity} = 0;
+        }
+    }
+    while(($name, $rec) = each %$r_edges) {
+        $$rec{multiplicity} = 1 unless(exists($$rec{multiplicity}));
+        $$rec{overlay_multiplicity} = 0 unless(exists($$rec{overlay_multiplicity}));
+    }
+}
+#============================================================================
+sub draw_edges($$) {
+	my ($r_edges, $r_params) = @_;
+
+	my ($edge_name, $edge);
+	
+    if(exists $$r_params{line_width}) {
+        print $$r_params{line_width}, " setlinewidth\n";
+    }
+	while(($edge_name, $edge) = each %$r_edges) {
+        if(not exists $$r_params{disable_mask}) {
+            next unless($$edge{show});                # apply the mask
+        }
+        
+        next if(exists $$r_params{edge_colour_rgb_by_direction}
+                and $$edge{direction} =~ /[`,.]/);
+
+        if(exists $$r_params{edge_colour_rgb_by_direction}) {
+            my $colour = 
+                $$r_params{edge_colour_rgb_by_direction}{$$edge{direction}};
+            print "$colour setrgbcolor ";
+        } elsif (exists $$r_params{edge_colour_rgb_by_overlay}) {
+            # don't do anything - we'll need to do this after counting edges.
+        } else {
+        # This is the older way of setting edge colour: by type of vertex.
+            next if ($$edge{direction} =~ /[.:`,]/);  # autohide these edges
+            my $colour = $$r_params{edge_colour}{$$edge{type}};
+
+            print "$colour setgray ";
+        }
+
+		my ($a0, $a1) = @{ $$edge{location_1} };
+		my ($b0, $b1) = @{ $$edge{location_2} };
+        if(exists $$r_params{edge_fudge} 
+            and exists $$r_params{edge_fudge}{$$edge{direction}}) {
+
+            my $scale = $$r_params{edge_fudge}{$$edge{direction}};
+            my $unit = $$r_params{unit_vectors}{$$edge{direction}};
+            
+            if(exists $$r_params{multiple_edges}) {
+                my $edge_count = 1;
+                if(exists($$edge{multiplicity})) {
+                    $edge_count = $$edge{multiplicity};
+                }
+                my $overlay_count = 0;
+                my $overlay_colours;
+                if(exists($$edge{overlay_multiplicity})) {
+                    $overlay_count = $$edge{overlay_multiplicity};
+
+                    my $colorkey = "($edge_count,$overlay_count)";
+                    $overlay_colours = $$r_params{edge_colour_rgb_by_overlay}{$colorkey};
+
+                    $edge_count += $overlay_count;
+                }
+                my $start_offset = -($edge_count - 1.0) / 2;
+                $a0 += $$unit[1]*$scale*$start_offset;
+                $b0 += $$unit[1]*$scale*$start_offset;
+                $a1 -= $$unit[0]*$scale*$start_offset; 
+                $b1 -= $$unit[0]*$scale*$start_offset; 
+                for(0..$edge_count-1) {
+                    print $$overlay_colours[$_], " setrgbcolor " if(defined $overlay_colours);
+                    print "$a0 $a1 moveto $b0 $b1 lineto stroke \n";
+                    $a0 += $$unit[1]*$scale;
+                    $b0 += $$unit[1]*$scale;
+                    $a1 -= $$unit[0]*$scale; 
+                    $b1 -= $$unit[0]*$scale; 
+                }
+                
+            } else {
+                $a0 += $$unit[1]*$scale;
+                $b0 += $$unit[1]*$scale;
+                $a1 -= $$unit[0]*$scale; 
+                $b1 -= $$unit[0]*$scale; 
+                print "$a0 $a1 moveto $b0 $b1 lineto stroke \n";
+            }
+        } else {
+            print "$a0 $a1 moveto $b0 $b1 lineto stroke \n";
+        }
+		
+	}
+}
+
+#============================================================================
+sub draw_vertices($$) {
+	my ($r_vertices, $r_params) = @_;
+
+	my $radius = $$r_params{vertex_radius};
+
+	my ($vertex_name, $vertex);
+	while(($vertex_name, $vertex) = each %$r_vertices) {
+        if(not exists $$r_params{disable_mask}) {
+            next unless ($$vertex{show});  # apply the mask
+        }
+		my $colour = $$r_params{vertex_colour}{$$vertex{type}};
+
+		print "$colour setgray ";
+
+		my ($a0, $a1) = @{ $$vertex{location} };
+		print "$a0 $a1 $radius 0 360 arc fill \n";
+	}
+}
+
+#============================================================================
+sub draw_rhombi($$$) {
+	my($r_vertices, $r_edges, $r_params) = @_;	
+
+	my($edge_name, $edge);
+
+	while(($edge_name, $edge) = each %$r_edges) {
+		my($type, $direction, $linecolour, $fillcolour);
+
+		$type = $$edge{type};
+		$direction = $$edge{direction};
+
+		next unless(exists($$r_params{rhombus_linecolour}));
+		next unless(exists($$r_params{rhombus_linecolour}{$type}));
+		next if($direction =~ /[,`.:]/);
+
+		$linecolour = $$r_params{rhombus_linecolour}{$type};
+
+		if(exists($$r_params{rhombus_fillcolour}) and
+		   exists($$r_params{rhombus_fillcolour}{$direction})) {
+			$fillcolour = $$r_params{rhombus_fillcolour}{$direction};
+		}
+
+		my($a, $b, @c, $v, $avg);
+		$a = $$edge{location_1};
+		$b = $$edge{location_2};
+		$c[0] = [2*$$a[0] - $$b[0], 2*$$a[1]-$$b[1]];
+		$c[2] = [2*$$b[0] - $$a[0], 2*$$b[1]-$$a[1]];
+
+		$avg  = [($$a[0]+$$b[0])/2,   ($$a[1] + $$b[1]) / 2];
+		$v    = [sqrt(3)/2 * ($$b[1]-$$a[1]),     sqrt(3)/2 * ($$a[0]-$$b[0])];
+		$c[1] = [$$avg[0] + $$v[0], $$avg[1] + $$v[1]];
+		$c[3] = [$$avg[0] - $$v[0], $$avg[1] - $$v[1]];
+
+		print $c[0][0], " ", $c[0][1], " moveto "; 
+		for(1..3) {
+			print $c[$_][0], " ", $c[$_][1], " lineto ";
+		}
+		print " closepath ";
+		if(defined $fillcolour) {
+			print " gsave $fillcolour setgray fill grestore "
+		} 
+		print "$linecolour setgray stroke\n";
+
+	}
+
+}
+
+
+#============================================================================
+sub print_pdftex_header($$$) {
+	my ($boundingbox, $r_params, $pdftex_name) = @_;
+
+	my $ur_corner_str = $$boundingbox[2] . "," . $$boundingbox[3];
+	my $bb_string = join " ", @$boundingbox;
+	my $global_label_fudge_factor = $$r_params{global_label_fudge_factor};
+	my $global_label_scale = $$r_params{global_label_scale};
+
+	print <<END_TEX_HEADER;
+\\begin{picture}(0,0)
+\\includegraphics[bb=$bb_string]{$pdftex_name}
+\\end{picture}
+\\setlength{\\unitlength}{${global_label_scale}pt}
+\%
+\\begingroup\\makeatletter\\ifx\\PutLabel\\undefined
+\\gdef\\PutLabel#1#2{
+\\put(#1){\\makebox(0,0){\\ensuremath{\\scriptstyle{#2}}}}
+}
+\\fi\\endgroup
+%
+\\begin{picture}($ur_corner_str)($global_label_fudge_factor)
+END_TEX_HEADER
+}
+
+#============================================================================
+sub print_tex_header($$$) {
+	my ($boundingbox, $r_params, $pstex_name) = @_;
+
+	my $ur_corner_str = $$boundingbox[2] . "," . $$boundingbox[3];
+	my $global_label_fudge_factor = $$r_params{global_label_fudge_factor};
+	my $global_label_scale = $$r_params{global_label_scale};
+
+	print <<END_TEX_HEADER;
+\\begin{picture}(0,0)
+\\includegraphics{$pstex_name}
+\\end{picture}
+\\setlength{\\unitlength}{${global_label_scale}pt}
+\%
+\\begingroup\\makeatletter\\ifx\\PutLabel\\undefined
+\\gdef\\PutLabel#1#2{
+\\put(#1){\\makebox(0,0){\\ensuremath{\\scriptstyle{#2}}}}
+}
+\\fi\\endgroup
+%
+\\begin{picture}($ur_corner_str)($global_label_fudge_factor)
+END_TEX_HEADER
+}
+
+#============================================================================
+# Given graph char array, mask char array, raw parameters and raw labels, 
+# reproduce the mkl file.  Right now label printing is disabled.
+sub print_mkl($$$$) {
+    my ($r_graph, $r_mask, $r_params, $r_labels) = @_;
+
+    for my $row (@$r_graph) {
+        print( join "", @$row);
+        print "\n";
+    }
+    if(scalar(@$r_mask) > 0) {
+    print "\nMASK\n";
+        for my $row (@$r_mask) {
+            print( join "", @$row);
+            print "\n";
+        }
+    }
+    print "\nPARAMETERS\n";
+    print $$r_params;
+    print "\nLABELS\n";
+
+    # Labels not implemented right now. 
+}
+
+#============================================================================
+sub typeset_labels($$$) {
+	my($edges, $r_params, $r_labels) = @_;
+
+	my($edge_name, $edge);
+	while(($edge_name, $edge) = each %$edges) {
+		my $row = $$edge{row};
+		my $col = $$edge{count};
+
+		if(exists $$r_labels{"A$row"} and exists $$r_labels{"A$row"}[$col]) {
+			my $label = $$r_labels{"A$row"}[$col];
+
+			if($label ne '~') {
+				my $coord = $$edge{label_1};
+				my $coordstr = $$coord[0] . "," . $$coord[1];
+				print "\\PutLabel{$coordstr}{$label}\n";
+			}
+			$$edge{A_label} = $label;
+		}
+
+		if(exists $$r_labels{"B$row"} and exists $$r_labels{"B$row"}[$col]) {
+			my $label = $$r_labels{"B$row"}[$col];			
+
+			if($label ne '~') {
+				my $coord = $$edge{label_2};
+				my $coordstr = $$coord[0] . "," . $$coord[1];
+				print "\\PutLabel{$coordstr}{$label}\n";
+			}
+
+			$$edge{B_label} = $label;
+		}
+	}
+}
+
+
+#============================================================================
+sub print_tex_footer() {
+	print "\\end{picture}\n";
+}
+
+#============================================================================
+sub bfs_for_kasteleyn($$$$); 
+sub bfs_for_kasteleyn($$$$) {
+	my ($root_name, $r_vertices, $r_edges, $r_params) = @_;
+
+	my $root_vertex = $$r_vertices{$root_name};
+	my @neighbour_names = @{ $$root_vertex{neighbour_names} };
+	my $parity = $$root_vertex{parity};
+
+	foreach(@neighbour_names) {
+		my $vertex = $$r_vertices{$_};
+		if(not exists($$vertex{parity})) {
+			if($parity==1) {
+				$$vertex{matrix_index} = $$r_params{current_col_index}++;
+			} else {
+				$$vertex{matrix_index} = $$r_params{current_row_index}++;
+			}
+			
+			$$vertex{parity} = -$parity;
+			bfs_for_kasteleyn($_, $r_vertices, $r_edges, $r_params);
+		}
+	}
+
+}
+#============================================================================
+sub print_kasteleyn($$$) {
+	my ($r_vertices, $r_edges, $r_params) = @_;
+
+	my $vertex_name = $$r_params{first_vertex};
+	my $vertex = $$r_vertices{$vertex_name};
+
+	$$vertex{parity} = 1;
+	$$vertex{matrix_index} = 0;
+	$$r_params{current_row_index} = 1;
+	$$r_params{current_col_index} = 0;
+
+	bfs_for_kasteleyn($vertex_name, $r_vertices, $r_edges, $r_params);
+
+	my $n = (scalar keys %$r_vertices) / 2;
+	my $i;
+	my @matrix;
+
+	for(0..$n-1) {
+		$matrix[$_] = [(0) x $n];
+	}	
+	
+
+	my ($edge_name, $edge);
+	while (($edge_name, $edge) = each %$r_edges) {
+		my $head_name = $$edge{v1_name};
+		my $tail_name = $$edge{v2_name};
+		my $head = $$r_vertices{$head_name};
+		my $tail = $$r_vertices{$tail_name};
+		if($$head{parity}==-1) {
+			($head, $tail) = ($tail, $head);
+			($head_name, $tail_name) = ($tail_name, $head_name);
+
+		}
+		my $row = $$head{matrix_index};
+		my $col = $$tail{matrix_index};
+
+		my ($A_label, $B_label);
+		if(exists $$edge{A_label} and exists $$edge{B_label}) {
+			$matrix[$row][$col] = "(" . $$edge{A_label} . ")*(" . 
+				$$edge{B_label} . ")";
+		} elsif(exists $$edge{A_label}) {
+			$matrix[$row][$col] = $$edge{A_label};
+		} elsif(exists $$edge{A_label}) {
+			$matrix[$row][$col] = $$edge{B_label};
+		} else {
+			$matrix[$row][$col] = 1;
+		}
+	}
+
+	my @matrixlines;
+	foreach(@matrix) {
+		my $line = " [". join(",\t", @$_). "]";
+
+		push( @matrixlines, $line );
+	}
+
+	print "with(LinearAlgebra):\nK := Matrix($n, $n, [\n";
+	print( join( "\,\n", @matrixlines ));
+	print "\n]):\nM := factor(Determinant(K));\n";
+}
+
+
+
+#============================================================================
+sub print_tex_stub($$) {
+	my ($basename, $boundingbox) = @_;
+
+	my $pagewidth = $$boundingbox[2] * 1.1;
+	my $pageheight = $$boundingbox[3] * 1.1;
+	print <<END_TEX;
+\\documentclass{article}
+
+\\usepackage{vmargin}
+\\usepackage{epsfig}
+
+
+\\setmargnohfrb{0pt}{0pt}{0pt}{0pt}
+
+\\begin{document}
+\\input{$basename.pstex_t}
+\\end{document}
+
+
+
+END_TEX
+}
+
+#============================================================================
+# Next few functions are to implement the dP3 domino shuffle.
+
+#============================================================================
+# Space-pad the graph and its mask on all sides, to make extra room.
+# Also: make sure that the rows are all the same length.
+sub add_boundary($$) {
+    my ($graph, $mask) = @_;
+
+    my $pad = " ";     # put a star in here or something to see the padding
+    my $sideborder = 6;
+    my $topborder = 3;
+
+    my $initial_len = 0;
+    for my $row (@$graph) {
+        $initial_len = scalar @$row if($initial_len < scalar @$row);
+    }
+    my $new_len = $initial_len + 2*$sideborder;
+
+    # Start by actually REMOVING ending blanks from the mask. 
+    # this is kinda stupid I guess, but easy and harmless.
+    # mind you, we have to be a little careful with whitespace rows...
+    for my $row (@$mask) {
+        my $char = " ";
+        while($char eq " " and scalar(@$row) > 0) {
+            $char = pop @$row;
+        }
+        push @$row, $char;
+    }
+
+    # pad sides to initial length, and then also add borders
+    for my $row (@$graph, @$mask) {
+        my $extra_pad = $initial_len - scalar(@$row);
+        push @$row, ( ($pad) x $extra_pad );
+
+        push @$row, ( ($pad) x $sideborder);
+        unshift @$row, ( ($pad) x $sideborder);
+    }
+    # pad top and bottom
+    for(1..$topborder) {
+        push @$graph, [($pad) x $new_len];
+        push @$mask, [($pad) x $new_len];
+        unshift @$mask, [($pad) x $new_len];
+        unshift @$graph, [($pad) x $new_len];
+    }
+}
+
+# These are pictures of full kites, in the encoding we're using.
+# The direction of a kite is the direction the long edges are pointing.
+# Shuffle direction 0 is NE/SW.
+my $NE_kite = <<END_NE_KITE;
+  4---6
+  |  /
+4~3=4
+END_NE_KITE
+my $SW_kite = <<END_SW_KITE;
+  4=3~4
+ /  |
+6---4
+END_SW_KITE
+
+# Shuffle direction 1 is NW/SE.  Those backslashes sure look ugly.
+my $NW_kite = <<END_NW_KITE;
+6---4
+ \\  |
+  4~3=4
+END_NW_KITE
+my $SE_kite = <<END_SE_KITE;
+4=3~4
+  |  \\
+  4---6
+END_SE_KITE
+
+#===========================================================================
+# Create a 2D array of characters from a multiline string, return a reference
+# to it.  Make the array rectangular by padding to the right with blanks if
+# needed.
+sub array_from_multiline_string($) {
+    my $input = shift;
+    my @rows = split /\n/, $input;
+    my @output;
+    my $row_len = 0;
+    for my $row (@rows) {
+        $row_len = length($row) if($row_len < length($row));
+    }
+    for my $row (@rows) {
+        my $padding = $row_len - length($row);
+        $row .= (" " x $padding);
+        push @output, [split //, $row];
+    }
+    return \@output;
+}
+
+my %kite_images = (
+    NW => array_from_multiline_string($NW_kite),
+    SE => array_from_multiline_string($SE_kite),
+    NE => array_from_multiline_string($NE_kite),
+    SW => array_from_multiline_string($SW_kite),
+);
+
+
+#============================================================================
+# Find *a* kite.  
+#
+# Strategy: look for a short vertical edge.  All the kites we care about have
+# them.  Then figure out which side of the edge is the center of the kite.
+#
+# Uh I guess we need kite names.  Let's use "K(row)(col)".
+
+sub find_a_kite($$){
+    my ($graph, $dir) = @_;
+    my $maxrow = $#$graph;
+    my $maxcol = $#{$$graph[0]};
+    ROW: for my $row (0..$maxrow) {
+        COL: for my $col (0..$maxcol) {
+            next unless($$graph[$row][$col] eq "|");
+            my $kite_col;
+            my $orientation;
+            my $north_vertex = $$graph[$row-1][$col];
+            if($dir==0) {      # NE/SW
+                if($north_vertex eq "3") {
+                    $kite_col = $col - 1; 
+                    $orientation = "SW";
+                } elsif($north_vertex eq "4") {
+                    $kite_col = $col + 1; 
+                    $orientation = "NE";
+                } else {
+                    die "This doesn't look like a dP3 graph";
+                }
+            } elsif($dir==1) { # NW/SE
+                if($north_vertex eq "3") {
+                    $kite_col = $col + 1; #SE
+                    $orientation = "SE";
+                } elsif($north_vertex eq "4") {
+                    $kite_col = $col - 1; #NW
+                    $orientation = "NW";
+                } else {
+                    die "This doesn't look like a dP3 graph";
+                }
+            }
+            # name, row, col, orientation
+            return ("K($row)($kite_col)", $row, $kite_col, $orientation); 
+        }
+    }
+    die "Looks like this isn't a dP3 graph!"
+}
+#==============================================================================
+# Here's a chunk of the dP3 graph, for reference.
+#
+#     4---6---4---6---4---6---4---6---4---6---4---6---4
+#     |  / \ X|  / \ X|  / \  |Y / \  |Y / \  |  / \  |
+#     3=4=3~4~3=4=3~4~3=4=3~4~3=4=3~4~3=4=3~4~3=4=3~4~3
+#      /  |X \ /  |X \ /  |  \ / Y|  \ / Y|  \ /  |  \
+#     6---4---6---4---6---4---6---4---6---4---6---4---6
+#      \ X|  / \ X|  / \  |  / \  |Y / \  |Y / \  |  /
+#     3~4~3=4=3~4~3=4=3~4~3=4=3~4~3=4=3~4~3=4=3~4~3=4=3
+#     |X \ /  |X \ /  |  \ /  |  \ / Y|  \ / Y|  \ /  |
+#     4---6---4---6---4---6---4---6---4---6---4---6---4
+#     |  / \ X|  / \  |  / \  |  / \  |Y / \  |Y / \  |
+#     3=4=3~4~3=4=3~4~3=4=3~4~3=4=3~4~3=4=3~4~3=4=3~4~3
+
+# This is used several places -- it's handy to be able to reverse compass 
+# directions.  For example, during shuffling, we have to turn northwest
+# kites into southeast ones, and vice versa.
+my %opposite_direction = (      
+    "NW" => "SE",
+    "SE" => "NW",
+    "NE" => "SW",
+    "SW" => "NE",
+);
+
+#============================================================================
+# Given the location of one kite, find all other kites in the graph 
+# (even partial ones).
+sub find_kites($$$){
+    my ($graph, $kites, $dir) = @_;
+    
+    my $maxrow = $#$graph;
+    my $maxcol = $#{$$graph[0]};
+
+    # pull the row and col. out of the name of the starter kite
+    my ($firstname, $firstrow, $firstcol, $firstorientation) 
+            = find_a_kite($graph, $dir);
+
+
+    
+
+    ROW: for my $row (1..$maxrow-1) {
+        COL: for my $col (2..$maxcol-2) {
+            # Kites are always on parallel diagonal lines
+            # which repeat with period 8.  The slope depends on the 
+            # shuffle direction.  See above.  The X's are direction 1 kites;
+            # they Y's are direction 0.
+
+            my $slope = ( $dir ? (-1) : (1) );
+            next unless(( ($row-$firstrow) % 2) ==0);
+            next unless((( ($row-$firstrow)-$slope*($col-$firstcol)) % 8) == 0);
+
+            # Make sure there's at least a partial kite there
+            next if(      $$graph[$row-1][$col] eq " " 
+                      and $$graph[$row+1][$col] eq " " 
+                      and $$graph[$row][$col+2] eq " " 
+                      and $$graph[$row][$col+1] eq " " 
+                      and $$graph[$row][$col-1] eq " " 
+                      and $$graph[$row][$col-2] eq " ");
+
+            # determine the orientation of this kite
+            my $orientation;
+            if((($firstrow - $row) % 4) == 0) {
+                $orientation = $firstorientation ;
+            } else {
+                $orientation = $opposite_direction{$firstorientation};
+            }
+            # This is debug code, so we can see where we think the kites are
+            $$graph[$row][$col] = "K";
+            push @$kites, {
+                name => "K($row)($col)",
+                row => $row,
+                col => $col,
+                orientation => $orientation,
+            };
+            
+        }
+    }
+}
+
+# This is where you find the edges of a kite.  Edges are long or short, and
+# they are ordered counterclockwise around the kite as follows: 
+#       long, long, short, short.
+# Every entry is (row offset, column offset)
+my %edge_offsets = (
+            # long      long        short       short       
+    NE => [ [0,2],      [-1,1],     [0,-1],     [1,0]      ],
+    SW => [ [0,-2],     [1,-1],     [0,1],      [-1,0]     ],
+
+    NW => [ [-1,-1],    [0,-2],     [1,0],      [0,1]      ],
+    SE => [ [1,1],      [0,2],      [-1,0],     [0,-1]     ],
+);
+
+#============================================================================
+# Classify the local matching on each kite.
+sub classify_kites($$$){
+    my ($mask, $kites, $dir) = @_;
+    for my $kite (@$kites) {
+        # Find the edges in the kite; see what's there.
+        my $orientation = $$kite{orientation};
+        my $offsets =  $edge_offsets{$orientation};
+        
+        my $edges = "";
+        for my $offset (@$offsets) {
+            my $row = $$kite{row} + $$offset[0];
+            my $col = $$kite{col} + $$offset[1];
+
+            if ($$mask[$row][$col] eq " ") {
+                $edges .= "0";
+            } else {
+                $edges .= "1";
+            }
+        }
+        $$kite{edges} = $edges;
+    }
+}
+
+#============================================================================
+# Initialize a new square 2D array to be the same size as an old array, with a 
+# blank in every spot.
+sub init_blank_array($$){
+    my ($new, $old) = @_;
+
+    my $maxrow = $#$old;
+    my $rowlen = scalar @{$$old[0]};
+
+    for my $row (0..$maxrow) {
+        my @blanks = (" ") x $rowlen;
+        $$new[$row] = [@blanks];
+    }
+}
+
+#============================================================================
+# Copy a small, 2D character array onto a big one in a given location. 
+# Blanks in the small array are ignored.
+# We need to know the location of the "center" of the small array.
+sub stamp($$$$$$) {
+    my ($canvas, $stamp, $center_row, $center_col, $dest_row, $dest_col) = @_;
+
+    my $max_stamp_row = $#$stamp;
+    my $max_stamp_col = $#{ $$stamp[0] };
+
+    ROW: for my $stamp_row (0..$max_stamp_row) {
+        COL: for my $stamp_col (0..$max_stamp_col) {
+            next COL if($$stamp[$stamp_row][$stamp_col] eq " ");
+
+            my $row = $dest_row + $stamp_row - $center_row;
+            my $col = $dest_col + $stamp_col - $center_col;
+
+            $$canvas[$row][$col] = $$stamp[$stamp_row][$stamp_col];
+        }
+    }
+}
+
+#===========================================================================
+# Here's the big table.  These are canonical pictures of the way perfect 
+# matchings look on a kite, in any orientation, ordered by which edges are 
+# present (again, the format is long, long, short, short counterclockwise
+# around the kite).  Possibile edge configurations are
+#
+#        0000, 1000, 0100, 0010, 0001, 0101, 1010
+# 
+# and possible kite orientations are NW, NE, SW, SE.  I'm sure there are 
+# shortcuts to be taken here but I'm just going to type them all in...
+
+
+my %kite_matchings = (
+    NW => {
+        '0000' => array_from_multiline_string(<<END),
+6   4  
+       
+  4 3=4
+END
+        '1000' => array_from_multiline_string(<<END),
+6---4  
+       
+  4 3=4
+END
+        '0100' => array_from_multiline_string(<<END),
+6   4  
+ \\     
+  4 3=4
+END
+        '0010' => array_from_multiline_string(<<END),
+6   4  
+       
+  4~3 4
+END
+        '0001' => array_from_multiline_string(<<END),
+6   4  
+    |  
+  4 3 4
+END
+        '0101' => array_from_multiline_string(<<END),
+6   4  
+ \\  |  
+  4 3 4
+END
+        '1010' => array_from_multiline_string(<<END),
+6---4  
+       
+  4~3 4
+END
+    },
+
+    SE => {
+        '0000' => array_from_multiline_string(<<END),
+4=3 4    
+         
+  4   6  
+END
+        '1000' => array_from_multiline_string(<<END),
+4=3 4    
+         
+  4---6  
+END
+        '0100' => array_from_multiline_string(<<END),
+4=3 4    
+     \\   
+  4   6  
+END
+        '0010' => array_from_multiline_string(<<END),
+4 3~4    
+         
+  4   6  
+END
+        '0001' => array_from_multiline_string(<<END),
+4 3 4    
+  |      
+  4   6  
+END
+        '0101' => array_from_multiline_string(<<END),
+4 3 4    
+  |  \\   
+  4   6  
+END
+        '1010' => array_from_multiline_string(<<END),
+4 3~4    
+         
+  4---6  
+END
+    },
+
+    NE => {
+        '0000' => array_from_multiline_string(<<END),
+  4   6  
+         
+4~3 4    
+END
+        '1000' => array_from_multiline_string(<<END),
+  4   6  
+     /   
+4~3 4    
+END
+        '0100' => array_from_multiline_string(<<END),
+  4---6  
+         
+4~3 4    
+END
+        '0010' => array_from_multiline_string(<<END),
+  4   6  
+  |      
+4 3 4    
+END
+        '0001' => array_from_multiline_string(<<END),
+  4   6  
+         
+4 3=4    
+END
+        '0101' => array_from_multiline_string(<<END),
+  4---6  
+         
+4 3=4    
+END
+        '1010' => array_from_multiline_string(<<END),
+  4   6  
+  |  /   
+4 3 4    
+END
+    },
+
+    SW => {
+        '0000' => array_from_multiline_string(<<END),
+  4 3~4
+       
+6   4  
+END
+        '1000' => array_from_multiline_string(<<END),
+  4 3~4
+ /     
+6   4  
+END
+        '0100' => array_from_multiline_string(<<END),
+  4 3~4
+       
+6---4  
+END
+        '0010' => array_from_multiline_string(<<END),
+  4 3 4
+    |  
+6   4  
+END
+        '0001' => array_from_multiline_string(<<END),
+  4=3 4
+       
+6   4  
+END
+        '0101' => array_from_multiline_string(<<END),
+  4=3 4
+       
+6---4  
+END
+        '1010' => array_from_multiline_string(<<END),
+  4 3 4
+ /  |  
+6   4  
+END
+    },
+);
+
+
+#============================================================================
+# Draw a rotated version of a kite in the new graph.
+sub draw_new_kite($$$){
+    my ($kite, $new_graph, $dir) = @_;
+    
+    my $orientation = $opposite_direction{$$kite{orientation}};
+
+    # The center of the kite is always in row 1, column 3.
+    stamp($new_graph, $kite_images{$orientation},
+        1, 3, $$kite{row}, $$kite{col} );
+}
+
+#============================================================================
+# Perform the domino shuffle on a kite and draw the result in the new mask.
+sub shuffle($$$$){
+    my ($kite, $new_mask, $dir, $threshold) = @_;
+
+    my $orientation = $opposite_direction{$$kite{orientation}}; 
+    my $edges = $$kite{edges};
+
+    if($edges eq '0000') {
+        if(rand() < $threshold) {
+            $edges =  '0101';
+        } else {
+            $edges =  '1010'; 
+        }
+    } elsif($edges eq '0101' or $edges eq '1010') {
+        $edges = '0000';
+    }
+
+
+    stamp($new_mask, $kite_matchings{$orientation}{$edges},
+        1, 3, $$kite{row}, $$kite{col} );
+}
+
+#============================================================================
+# Copy over stationary edges (those not in any kite) into the new mask / graph.
+sub copy_stationary_edges($$$){
+    my ($old, $new, $dir) = @_;
+
+    my $edge;
+    $edge = "\\" if($dir == 0);
+    $edge = "/" if($dir == 1);
+
+    my $maxrow = $#$old;
+    my $maxcol = $#{$$old[0]};
+    ROW: for my $row (0..$maxrow) {
+        COL: for my $col (0..$maxcol) {
+            $$new[$row][$col] = $edge if($$old[$row][$col] eq $edge);
+        }
+    } 
+}
+
+#============================================================================
+# Sometimes this algorithm generates vertices which aren't matched to anything
+# around the edges.  This happens in a predictable fashion for e.g. aztec 
+# diamonds, but computationally the easiest way to handle this is just to search
+# for and remove them.
+# 
+# The orphaned vertices are always on the end of a tail, so they're always the
+# first or last "4" in their row.
+sub remove_orphaned_vertices($$) {
+    my ($graph, $mask) = @_;
+
+    my $maxrow = $#$graph;
+    my $maxcol = $#{$$graph[0]};
+
+    # Delete orphaned vertices at start of row
+    ROW: for my $row (0..$maxrow) {
+        my $col = 0;
+        while($col < $maxcol) {
+            if($$graph[$row][$col] ne " ") {
+                if(          $$graph[$row][$col] eq "4" 
+                        and  $$graph[$row+1][$col-1] eq " "
+                        and  $$graph[$row-1][$col-1] eq " " 
+                        and  $$graph[$row+1][$col] eq " "
+                        and  $$graph[$row-1][$col] eq " " 
+                        and  $$graph[$row+1][$col+1] eq " "
+                        and  $$graph[$row-1][$col+1] eq " ") {
+
+                    $$graph[$row][$col] = " ";
+                    $$graph[$row][$col+1] = " ";
+                    $$mask[$row][$col] = " ";
+                }
+                next ROW;
+            }
+            $col++;
+        }
+    }
+    # Delete orphaned vertices at end of row
+    ROW: for my $row (0..$maxrow) {
+        my $col = $maxcol;
+        while($col > 0) {
+            if($$graph[$row][$col] ne " ") {
+                if(          $$graph[$row][$col] eq "4" 
+                        and  $$graph[$row+1][$col-1] eq " "
+                        and  $$graph[$row-1][$col-1] eq " " 
+                        and  $$graph[$row+1][$col] eq " "
+                        and  $$graph[$row-1][$col] eq " " 
+                        and  $$graph[$row+1][$col+1] eq " "
+                        and  $$graph[$row-1][$col+1] eq " ") {
+
+                    $$graph[$row][$col] = " ";
+                    $$graph[$row][$col-1] = " ";
+                    $$mask[$row][$col] = " ";
+                }
+                next ROW;
+            }
+            $col--;
+        }
+    }
+
+}
+
+#============================================================================
+# Find a vertex of a graph (presumably to start the BFS)
+sub find_first_vertex($){
+    my ($graph) = @_;
+
+    my $maxrow = $#$graph;
+    my $maxcol = $#{$$graph[0]};
+    ROW: for my $row (0..$maxrow) {
+        COL: for my $col (0..$maxcol) {
+            return "V($row)($col)" if($$graph[$row][$col] ne " ");
+        }
+    }
+}
+
+#============================================================================
+# Remove a fixed amount of extra whitespace around a graph/mask pair.
+sub crop($$) {
+    my ($new_graph, $new_mask) = @_;
+
+    my $top_crop = 1;
+    my $left_crop = 4;    
+    my $right_crop = 2;    
+
+    for(1..$top_crop) {
+        shift @$new_graph;
+        shift @$new_mask;
+        pop @$new_graph;
+        pop @$new_mask;
+    }
+    ROW: for my $row (@$new_graph, @$new_mask) {
+        for(1..$left_crop) {
+            shift @$row;
+        }
+        for(1..$right_crop) {
+            pop @$row;
+        }
+    }
+}
+
+
+
+#============================================================================
+# This is the domino shuffling algorithm on the dP3 lattice.
+sub dP3_shuffle($$$$$)
+{
+    my ($graph, $mask, $param_str, $params, $labels) = @_;
+    my (@kites, @new_graph, @new_mask, $first_kite);
+
+    # We'll probably need some extra rows on all sides of the original.
+    add_boundary($graph, $mask);
+
+    
+    # 2 shuffle directions are implemented -- 0 and 1.
+
+    die "Please specify 0 or 1 as the shuffle_direction parameter"  
+        unless(exists $$params{shuffle_direction});
+    my $dir = $$params{shuffle_direction};
+
+    find_kites($graph, \@kites, $dir);
+    
+    # we gotta append a bunch of ovals to the eps code
+
+    # debug code
+    #print_mkl($graph, $mask, $param_str, $labels);
+    #die;
+
+    classify_kites($mask, \@kites, $dir);
+
+
+    init_blank_array(\@new_graph, $graph);
+    init_blank_array(\@new_mask, $mask);
+
+    for my $kite (@kites) {
+        draw_new_kite($kite, \@new_graph, $dir);
+        my $threshold = 0.5;
+        if(exists($$params{shuffle_thresholds})) {
+            $threshold = $$params{shuffle_thresholds}[$dir];
+        }
+        shuffle($kite, \@new_mask, $dir, $threshold );
+    }
+
+    copy_stationary_edges($mask, \@new_mask, $dir);
+    copy_stationary_edges($graph, \@new_graph, $dir);
+
+    remove_orphaned_vertices(\@new_graph, \@new_mask);
+
+    # Remove any extra whitespace
+    crop(\@new_graph, \@new_mask);
+    
+    # We're probably going to shuffle this guy again, so change the direction
+    # of the shuffle. Also first vertex might move.  It's easiest (though
+    # slightly error-prone, whitespace-dependent, etc. ) to just edit the raw 
+    # parameters from the old file.
+
+    my $old_first_vertex = $$params{first_vertex};
+    my $new_first_vertex =  find_first_vertex(\@new_graph);
+    my $new_dir = 1 - $dir;
+
+    #$$param_str =~ s/\(?<=first_vertex.*?\)$old_first_vertex/$new_first_vertex/;
+    $$param_str =~ s/first_vertex\s*=>\s*'.*?'/first_vertex => '$new_first_vertex'/;
+    #$$param_str =~ s/\(?<=shuffle_direction.*?\)$dir/$new_dir/;
+    $$param_str =~ s/shuffle_direction\s*=>\s*$dir/shuffle_direction => $new_dir/;
+
+    print_mkl(\@new_graph, \@new_mask, $param_str, $labels);
+}
+
+#============================================================================
+# Main code.
+my $state = "GRAPH";
+my(%vertices, %edges, %params, %new_params, $param_str, %labels, @raw, $key, $val);
+my(@mask, @overlay);
+
+# These are default values.
+%params = (
+	vertex_types =>  '[X]',
+	edge_len =>  {
+		XX=>20,
+	},
+	edge_colour =>  {
+		XX=>0,
+	},
+
+	vertex_colour =>  {X=>0},
+	first_location => [300,600],
+
+	unit_vectors =>   {
+               '-'  => [1,0] ,
+               '='  => [1,0] ,
+               '!'  => [1,0] ,
+			   '|'  => [0,-1] ,
+			   '.'  => [1,0] ,
+			   ':'  => [0,-1] ,
+			   '/'  => [0.5, sqrt(3)/2], 
+			   ','  => [0.5, sqrt(3)/2], 
+			   '\\' => [0.5, -sqrt(3)/2],
+			   '`' => [0.5, -sqrt(3)/2]},
+
+	label_unit_vectors => {
+                   '-' => [0,1] , 
+                   '=' => [0,1] , 
+                   '~' => [0,1] , 
+			       '|' => [-1,0],
+			       '.' => [0,1] , 
+			       ':' => [-1,0],
+			       '/' => [sqrt(3)/2, -0.5],
+			       ',' => [sqrt(3)/2, -0.5],
+			       '\\' =>[-sqrt(3)/2, -0.5],
+			       '`' =>[-sqrt(3)/2, -0.5]},
+
+	label_offsets =>  {
+               '-'  => [5,-5], 
+               '='  => [5,-5], 
+               '~'  => [5,-5], 
+               '|'  => [5,-5],
+			   '.'  => [5,-5], 
+                           ':'  => [5,-5],
+			   '/'  => [5,-4], 
+			   ','  => [5,-4], 
+			   '\\' => [5,-7],
+			   '`' => [5,-7] },
+
+	boundingbox_margins => [10,10,10,10],
+	global_label_fudge_factor => '8,0',
+	global_label_scale => '1.00375',
+	vertex_radius => 2,
+);
+
+die "Please give me the base name of a .mkl file" unless (scalar @ARGV == 1) ;
+my $basename = $ARGV[0];
+$basename =~ s/\.mkl$//;
+
+close(STDIN);
+open(STDIN, "<$basename.mkl") or die $!;
+while(<STDIN>) {
+	/PARAMETERS/ and $state="PARAMETERS", next;
+	/LABELS/ and $state="LABELS", next;
+	/MASK/ and $state="MASK", next;
+    /OVERLAY/ and $state="OVERLAY", next;
+	/^$/ and next;    # We should skip totally blank lines.  Lines with just
+                      # whitespace are necessary in the mask sometimes.
+	if($state eq "GRAPH") {
+		read_graph_line($_, \@raw);
+	} elsif($state eq "PARAMETERS") {
+		read_param_line($_, \$param_str);
+	} elsif($state eq "LABELS") {
+		read_label_line($_, \%labels);
+	} elsif($state eq "MASK") {
+        read_graph_line($_, \@mask);
+    } elsif($state eq "OVERLAY") {
+        read_graph_line($_, \@overlay);
+    }
+    
+}
+
+%new_params = eval "($param_str)";
+while(($key, $val) = each %new_params) {
+	$params{$key} = $val;
+}
+
+if(exists $params{just_reproduce_mkl}) {
+    print_mkl(\@raw, \@mask, \$param_str, \%labels);
+    exit;
+}
+
+
+parse_graph(\@raw,     \%vertices, \%edges, \%params, \@mask);
+
+my(%overlay_vertices, %overlay_edges);
+if(exists $params{edge_colour_rgb_by_overlay}) {
+    parse_graph(\@overlay, \%overlay_vertices, \%overlay_edges, \%params, \@mask);
+    incorporate_overlay(\%vertices, \%overlay_vertices, \%edges, \%overlay_edges);
+}
+
+
+locate_vertices(\%vertices, \%edges, \%params);
+my $boundingbox = fit_to_bounding_box(\%vertices, \%params);
+locate_edges(\%vertices, \%edges, \%params);
+
+if(exists $params{raw_text_output_only}) {
+    my ($vertex_name, $vertex);
+    close STDOUT;
+    open STDOUT, ">$basename.vertex";
+    while (($vertex_name, $vertex) = each %vertices ) {
+        my ($row, $col) = ($vertex_name =~ /V\((.*?)\)\((.*?)\)/);
+		my ($x, $y) = @{ $$vertex{location} };
+        print "$row,$col,$x,$y\n";
+    }
+    close STDOUT;
+    open STDOUT, ">$basename.edge";
+    foreach (keys %edges) {
+        next unless ($edges{$_}{show});
+        my ($r1,$c1,$r2,$c2) = /E\((.*?)\)\((.*?)\)\((.*?)\)\((.*?)\)/;
+        print "$r1,$c1,$r2,$c2\n";
+    }
+    close STDOUT;
+    if(exists $params{find_hexagons}) {
+        open STDOUT, ">$basename.hexagon";
+        for my $i (0..$#raw) {
+            my @row = @{$raw[$i]};
+            for my $j (0..$#row) {
+
+#      X---X
+#     /     \
+#    X   H   X
+#     \     /
+#      X---X
+
+                if($row[$j] eq "H") {
+                    my $output = join ",",  $i,$j-4, $i-2,$j-2, $i-2,$j+2,
+                                 $i,$j+4, $i+2,$j+2, $i+2,$j-2;
+                    print "$output\n";
+                }
+            }
+        }
+        close STDOUT;
+    }
+}
+
+close(STDOUT);
+
+open(STDOUT, ">$basename.pstex");
+
+print_ps_header("$basename.pstex", $boundingbox);
+draw_edges(\%edges, \%params)	        unless(exists($params{do_not_render_edges}));
+draw_vertices(\%vertices, \%params)     unless(exists($params{do_not_render_vertices}));
+draw_rhombi(\%vertices, \%edges, \%params);
+print_ps_footer();
+
+close(STDOUT);
+
+
+
+if(exists($params{pdf_output})) {
+	system("ps2pdf -dEPSCrop $basename.pstex");
+	system("mv $basename.pstex.pdf $basename.pdf");
+	system("rm $basename.pstex");
+
+	open(STDOUT, ">$basename.pdftex_t");
+	print_pdftex_header($boundingbox, \%params, "$basename.pdf");
+	typeset_labels(\%edges, \%params, \%labels);
+	print_tex_footer();
+	close(STDOUT);
+} else {
+	open(STDOUT, ">$basename.pstex_t");
+	print_tex_header($boundingbox, \%params, "$basename.pstex");
+	typeset_labels(\%edges, \%params, \%labels);
+	print_tex_footer();
+	close(STDOUT);
+}
+
+
+if(exists $params{output_kasteleyn}) {
+	open(STDOUT, ">$basename.mpl");
+	print_kasteleyn(\%vertices, \%edges, \%params);
+	close(STDOUT);
+}
+
+
+if(exists $params{compile_tex_stub}) {
+	open(STDOUT, ">$basename.tex");
+	print_tex_stub($basename, $boundingbox);
+	system "latex '\\scrollmode\\input{$basename.tex}'";
+	system "dvips $basename.dvi -E -o $basename.eps";
+	close(STDOUT);
+}
+
+my $new_basename;
+if(exists $params{dP3_shuffle}) {
+    # Let's just see if there's a number at the end of the basename
+    # if there is we'll add 0.5 to it....
+    
+    my $new_param_str = $param_str;
+    my $num_shuffles = $params{dP3_shuffle};
+    my $fewer_shuffles = $num_shuffles - 1;
+
+    if($num_shuffles > 0) {
+        $new_param_str =~ 
+             s/dP3_shuffle\s*=>\s*$num_shuffles/dP3_shuffle => $fewer_shuffles/;
+
+
+        if($basename =~ /[0-9.]+$/) {
+            my ($subbasename, $order) = ($basename =~ /(.*?)([0-9.]+)$/);
+            $order += 0.5;
+            $new_basename = $subbasename . $order;
+        } else {
+            $new_basename .= ".shuffle";
+        }
+        open(STDOUT, ">$new_basename.mkl");
+        dP3_shuffle(\@raw, \@mask, \$new_param_str, \%params, \%labels);
+        close(STDOUT);
+    }
+}
+
+if(exists $params{dP3_shuffle} and $params{dP3_shuffle}>0) {
+    # this is so dumb.  Rerun this code on the file we just made.
+    exec "mklattice $new_basename.mkl";
+}
+
+
+
+
+
