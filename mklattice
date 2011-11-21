@@ -1585,14 +1585,56 @@ if(exists $params{raw_text_output_only}) {
     }
     close STDOUT;
     open STDOUT, ">$basename.edge";
-    foreach (keys %edges) {
+    open RHOMBUS, ">$basename.rhombus";
+    EDGE: foreach (keys %edges) {
         next unless ($edges{$_}{show});
         my ($r1,$c1,$r2,$c2) = /E\((.*?)\)\((.*?)\)\((.*?)\)\((.*?)\)/;
         print "$r1,$c1,$r2,$c2\n";
+
+        # rhombus-finding code from here on.
+        my $direction = $edges{$_}{direction};
+        my @rhomblist; 
+
+        # p is the leftmost endpoint of the edge.
+        my @p = ($r1,$c1);
+        @p = ($r2,$c2) if($c2 < $c1);
+
+        # Look to see if the edge is sitting inside a complete rhombus.
+        if($direction eq '-') {
+            @rhomblist = (  [$p[0], $p[1]-4], 
+                            [$p[0]-2, $p[1]+2], 
+                            [$p[0], $p[1]+8], 
+                            [$p[0]+2, $p[1]+2]);
+        } elsif($direction eq '/') {
+            @rhomblist = (  [$p[0]+2, $p[1]-2], 
+                            [$p[0]-2, $p[1]-2], 
+                            [$p[0]-4, $p[1]+4], 
+                            [$p[0]  , $p[1]+4]);
+        } elsif($direction eq '\\') {
+            @rhomblist = (  [$p[0]-2, $p[1]-2], 
+                            [$p[0]  , $p[1]+4], 
+                            [$p[0]+4, $p[1]+4], 
+                            [$p[0]+2, $p[1]-2]);
+        }
+        my @rhombstrings = ();
+        for my $rhombvertex (@rhomblist) {
+            my ($r,$c) = @{ $rhombvertex };
+            next EDGE if($r<0 or $c<0
+                        or not exists($raw[$r])
+                        or not exists($raw[$r][$c])
+                        or $raw[$r][$c] ne "H");
+            push @rhombstrings, "$r,$c";
+        }
+        
+        print RHOMBUS "$r1,$c1,$r2,$c2,";
+        print RHOMBUS join(',', @rhombstrings);
+        print RHOMBUS "\n";
     }
+    close RHOMBUS;
     close STDOUT;
     if(exists $params{find_hexagons}) {
         open STDOUT, ">$basename.hexagon";
+        open DUALVERTEX, ">$basename.dualvertex";
         for my $i (0..$#raw) {
             my @row = @{$raw[$i]};
             for my $j (0..$#row) {
@@ -1607,11 +1649,21 @@ if(exists $params{raw_text_output_only}) {
                     my $output = join ",",  $i,$j-4, $i-2,$j-2, $i-2,$j+2,
                                  $i,$j+4, $i+2,$j+2, $i+2,$j-2;
                     print "$output\n";
+
+                    my $j1 = $j-4;
+                    my $j2 = $j+4;
+                    my ($x1, $y1) = @{ $vertices{"V($i)($j1)"}{location} };
+                    my ($x2, $y2) = @{ $vertices{"V($i)($j2)"}{location} };
+                    my $x = ($x1 + $x2)/2;
+                    my $y = ($y1 + $y2)/2;
+                    print DUALVERTEX "$i,$j,$x,$y\n"
                 }
             }
         }
         close STDOUT;
+        close DUALVERTEX;
     }
+    
 }
 
 close(STDOUT);
